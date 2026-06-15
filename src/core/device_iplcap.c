@@ -123,7 +123,7 @@ static char *iplcap_input_args[] =
     "ReordDupIgnoreEnable",
     "AuthenticationEnabled",
     "AuthenticationCode",
-    "AuthenticationAlias",
+    "AuthenticationKeyId",
     "AuthenticationKeyFileLocation",
     "DSCP",
     "StartSendingRateIndex",
@@ -214,9 +214,10 @@ void IPLCap_ExtractCapabilities(JsonNode *root);
 int Get_IPLCap_SoftwareVersion(dm_req_t *req, char *buf, int len);
 int Get_IPLCap_ProtocolVersion(dm_req_t *req, char *buf, int len);
 int Get_IPLCap_SupportedMetrics(dm_req_t *req, char *buf, int len);
-int ExtractKeyIDFromAuthAlias(char *auth_alias, unsigned *key_id);
-int LookupKeyByAuthAlias(char *auth_alias, char *buf, int len, combined_role_t *combined_role);
+int LookupKeyByAuthKeyID(int auth_key_id, char *buf, int len, combined_role_t *combined_role);
 void IPLCap_AddCmdArgs(str_vector_t *sv, char *cmd_switch, const char *fmt, ...);
+int AutoPopulate_AuthenticationKeyID(dm_req_t *req, char *buf, int len);
+int Validate_AuthenticationKeyID(dm_req_t *req, char *value);
 
 /*********************************************************************//**
 **
@@ -248,6 +249,11 @@ int DEVICE_IPLCAP_Init(void)
     err |= USP_REGISTER_Param_NumEntries(DEVICE_IPLC_AUTH_ROOT "NumberOfEntries", DEVICE_IPLC_AUTH_ROOT ".{i}");
     err |= USP_REGISTER_DBParam_Alias(DEVICE_IPLC_AUTH_ROOT ".{i}.Alias", NULL);
     err |= USP_REGISTER_DBParam_Secure(DEVICE_IPLC_AUTH_ROOT ".{i}.AuthenticationKey", "", NULL, NULL);
+    err |= USP_REGISTER_DBParam_ReadWriteAuto(DEVICE_IPLC_AUTH_ROOT ".{i}.AuthenticationKeyID", AutoPopulate_AuthenticationKeyID, Validate_AuthenticationKeyID, NULL, DM_UINT);
+
+    // Register unique keys for IPLayerCapacityAuth table
+    char *unique_keys[] = { "AuthenticationKeyID" };
+    err |= USP_REGISTER_Object_UniqueKey(DEVICE_IPLC_AUTH_ROOT ".{i}", unique_keys, NUM_ELEM(unique_keys));
 
     // Register capabilities parameters
     // NOTE: These will be populated when we receive a JSON response from the UDPST client
@@ -301,7 +307,7 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
     bool reord_dup_ignore_enable;
     bool auth_enabled;
     char *auth_code;
-    char *auth_alias;
+    int auth_key_id;
     char *auth_key_file;
     unsigned dscp;
     unsigned start_sending_rate_index;
@@ -323,7 +329,6 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
     str_vector_t servers;
     char cmd[4096];
     iplcap_input_cond_t *cond;
-    unsigned key_id;
     int i;
     char key[MAX_DM_VALUE_LEN];
     combined_role_t combined_role;
@@ -341,7 +346,7 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
     IPLCap_AddCmdArgs(&cond->argv, "-f", "%s", "jsonf");
 
     // Exit if unable to get the Role
-    role = USP_ARG_Get(input_args, "Role", NULL);
+    role = USP_ARG_Get(input_args, "Role", "Receiver");
     if (role==NULL)
     {
         USP_ERR_SetMessage("%s: No Role provided", __FUNCTION__);
@@ -421,23 +426,26 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
         STR_VECTOR_Add(&cond->argv, "-j");
     }
 
-    // Exit if unable to get MTU
-    #define DEFAULT_MTU 1500
-    err = USP_ARG_GetUnsigned(input_args, "MTU", DEFAULT_MTU, &mtu);
+    // Exit if unable to get starting frame size. The frame size will increase above this if jumbo frames are permitted
+    #define SAFE_MTU 1250    // Safe MTU size that avoids fragmentation when tunneling or encapsulation is present. Typical for FWA
+    #define TRAD_MTU 1500    // Traditional MTU size that avoids fragmentation when tunneling or encapsulation is not present. Typical for PON/copper
+    err = USP_ARG_GetUnsigned(input_args, "MTU", TRAD_MTU, &mtu);
     if (err != USP_ERR_OK)
     {
         goto exit;
     }
 
-    if (mtu == DEFAULT_MTU)
+    // Exit if MTU is set to a value which is not supported by udpst
+    if ((mtu != TRAD_MTU) && (mtu != SAFE_MTU))
     {
-        STR_VECTOR_Add(&cond->argv, "-T");
-    }
-    else
-    {
-        USP_ERR_SetMessage("%s: Invalid value for MTU (%u). Only supported value=%u", __FUNCTION__, mtu, DEFAULT_MTU);
+        USP_ERR_SetMessage("%s: Invalid MTU specified (%d). Only values supported are %d and %d", __FUNCTION__, mtu, TRAD_MTU, SAFE_MTU);
         err = USP_ERR_INVALID_COMMAND_ARGS;
         goto exit;
+    }
+
+    if (mtu == TRAD_MTU)
+    {
+        STR_VECTOR_Add(&cond->argv, "-T");
     }
 
     // Exit if unable to get UDPPayloadContent
@@ -517,84 +525,83 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
         goto exit;
     }
 
-    // Handle AuthenticationCode, AuthenticationAlias and AuthenticationKeyFileLocation
+    // Exit if unable to get AuthenticationKeyID
+    err = USP_ARG_GetInt(input_args, "AuthenticationKeyID", INVALID, &auth_key_id);
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Exit if AuthenticationKeyID is not in range
+    #define AUTH_KEY_ID_MIN 0
+    #define AUTH_KEY_ID_MAX 255
+    if ((auth_key_id != INVALID) && ((auth_key_id < AUTH_KEY_ID_MIN) || (auth_key_id > AUTH_KEY_ID_MAX)) )
+    {
+        USP_ERR_SetMessage("%s: AuthenticationKeyID (%d) is out of range [%d:%d]", __FUNCTION__, auth_key_id, AUTH_KEY_ID_MIN, AUTH_KEY_ID_MAX);
+        err = USP_ERR_INVALID_VALUE;
+        goto exit;
+    }
+
+    // Handle AuthenticationCode, AuthenticationKeyID and AuthenticationKeyFileLocation
     auth_code = USP_ARG_Get(input_args, "AuthenticationCode", "");
-    auth_alias = USP_ARG_Get(input_args, "AuthenticationAlias", "");
     auth_key_file = USP_ARG_Get(input_args, "AuthenticationKeyFileLocation", "");
 
     if (auth_enabled==true)
     {
         // Exit if authentication is enabled, but no authentication details provided
-        if ((*auth_code == '\0') && (*auth_alias == '\0') && (*auth_key_file == '\0'))
+        if ((*auth_code == '\0') && (auth_key_id == INVALID) && (*auth_key_file == '\0'))
         {
             USP_ERR_SetMessage("%s: Authentication is enabled, but no authentication details provided", __FUNCTION__);
             err = USP_ERR_INVALID_COMMAND_ARGS;
             goto exit;
         }
 
-        if ((*auth_code != '\0') && (*auth_alias == '\0') && (*auth_key_file == '\0'))
+        if ((*auth_code != '\0') && (auth_key_id == INVALID) && (*auth_key_file == '\0'))
         {
             // If only AuthenticationCode is provided, the client uses the value directly as the key.
             IPLCap_AddCmdArgs(&cond->argv, "-a", "%s", auth_code);
         }
-        else if ((*auth_code != '\0') && (*auth_alias != '\0') && (*auth_key_file == '\0'))
+        else if ((*auth_code != '\0') && (auth_key_id != INVALID) && (*auth_key_file == '\0'))
         {
-            // If both AuthenticationCode and AuthenticationAlias are provided but AuthenticationKeyFileLocation is not provided,
-            // the client uses the AuthenticationCode as the key and the AuthenticationAlias as key ID.
+            // If both AuthenticationCode and AuthenticationKeyID are provided but AuthenticationKeyFileLocation is not provided,
+            // the client uses the AuthenticationCode as the key and the AuthenticationKeyID as key ID.
             // The IPLayerCapacityAuthCode table is ignored.
-            err = ExtractKeyIDFromAuthAlias(auth_alias, &key_id);
-            if (err != USP_ERR_OK)
-            {
-                goto exit;
-            }
-
-            IPLCap_AddCmdArgs(&cond->argv, "-y", "%u", key_id);
+            IPLCap_AddCmdArgs(&cond->argv, "-y", "%d", auth_key_id);
             IPLCap_AddCmdArgs(&cond->argv, "-a", "%s", auth_code);
         }
-        else if ((*auth_code == '\0') && (*auth_alias != '\0') && (*auth_key_file == '\0'))
+        else if ((*auth_code == '\0') && (auth_key_id != INVALID) && (*auth_key_file == '\0'))
         {
-            // If only AuthenticationAlias is provided, the client uses the IPLayerCapacityAuthCode table to derive the
-            // IPLayerCapacityAuthCode.{i}.Alias to use as key ID, and the IPLayerCapacityAuthCode.{i}.AuthenticationKey as the key.
-            // If the IPLayerCapacityAuthCode table does not contain the AuthenticationAlias, the client returns an error.
-            err = ExtractKeyIDFromAuthAlias(auth_alias, &key_id);
-            if (err != USP_ERR_OK)
-            {
-                goto exit;
-            }
-
+            // If only AuthenticationKeyID is provided, AuthenticationKeyID is used to select the instance to use from the IPLayerCapacityAuthCode
+            // table. The client uses IPLayerCapacityAuthCode.{i}.AuthenticationKey as the key and AuthenticationKeyID as key ID.
+            // If the IPLayerCapacityAuthCode table does not contain the AuthenticationKeyID , the client returns an error.
             MSG_HANDLER_GetMsgRole(&combined_role);
-            err = LookupKeyByAuthAlias(auth_alias, key, sizeof(key), &combined_role);
+            err = LookupKeyByAuthKeyID(auth_key_id, key, sizeof(key), &combined_role);
             if (err != USP_ERR_OK)
             {
                 goto exit;
             }
 
-            IPLCap_AddCmdArgs(&cond->argv, "-y", "%u", key_id);
+            IPLCap_AddCmdArgs(&cond->argv, "-y", "%d", auth_key_id);
             IPLCap_AddCmdArgs(&cond->argv, "-a", "%s", key);
         }
-        else if ((*auth_code == '\0') && (*auth_alias != '\0') && (*auth_key_file |= '\0'))
+        else if ((*auth_code == '\0') && (auth_key_id != INVALID) && (*auth_key_file |= '\0'))
         {
-            // If both AuthenticationAlias and AuthenticationKeyFileLocation are provided, but AuthenticationCode
-            // is not provided, the client uses the AuthenticationAlias as key ID along with AuthenticationKeyFileLocation
+            // If both AuthenticationKeyID and AuthenticationKeyFileLocation are provided, but AuthenticationCode
+            // is not provided, the client uses the AuthenticationKeyID as key ID along with AuthenticationKeyFileLocation
             // as file location. The IPLayerCapacityAuthCode table is ignored.
-            err = ExtractKeyIDFromAuthAlias(auth_alias, &key_id);
-            if (err != USP_ERR_OK)
-            {
-                goto exit;
-            }
-
-            IPLCap_AddCmdArgs(&cond->argv, "-y", "%u", key_id);
+            IPLCap_AddCmdArgs(&cond->argv, "-y", "%d", auth_key_id);
             IPLCap_AddCmdArgs(&cond->argv, "-K", "%s", auth_key_file);
         }
-        else if ((*auth_code == '\0') && (*auth_alias == '\0') && (*auth_key_file != '\0'))
+        else if ((*auth_code == '\0') && (auth_key_id == INVALID) && (*auth_key_file != '\0'))
         {
-            // If only AuthenticationKeyFileLocation is provided, the file specified MUST contain a single entry.
-            // Otherwise, the client returns an error.
+            // If only AuthenticationKeyFileLocation is provided, if the file specified contains only a single entry,
+            // then it uses that as the key. If the file contains multiple entries, then it uses the key from the entry
+            // with Key ID equal to 0. If no entry exists with Key ID equal to 0, the client returns an error.
             IPLCap_AddCmdArgs(&cond->argv, "-K", "%s", auth_key_file);
         }
         else
         {
-            USP_ERR_SetMessage("%s: Invalid combination of Authentication arguments(AuthenticationCode, AuthenticationAlias=%s, AuthenticationKeyFileLocation=%s)", __FUNCTION__, auth_alias, auth_key_file);
+            USP_ERR_SetMessage("%s: Invalid combination of Authentication arguments(AuthenticationCode, AuthenticationKeyID=%d, AuthenticationKeyFileLocation=%s)", __FUNCTION__, auth_key_id, auth_key_file);
             err = USP_ERR_INVALID_COMMAND_ARGS;
             goto exit;
         }
@@ -614,7 +621,7 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
     {
         goto exit;
     }
-    IPLCap_AddCmdArgs(&cond->argv, "-I", "%u", start_sending_rate_index);
+    IPLCap_AddCmdArgs(&cond->argv, "-I", "@%u", start_sending_rate_index);
 
     // Exit if unable to get TestSubInterval
     err = USP_ARG_GetUnsignedWithinRange(input_args, "TestSubInterval", 1000, 100, 6000, &test_sub_interval);
@@ -776,7 +783,7 @@ int IPLCap_Operate(dm_req_t *req, kv_vector_t *input_args, int instance)
     USP_LOG_Info("ReordDupIgnoreEnable: %d", reord_dup_ignore_enable);
     USP_LOG_Info("AuthenticationEnabled: %d", auth_enabled);
     USP_LOG_Info("AuthenticationCode: %s", auth_code);
-    USP_LOG_Info("AuthenticationAlias: %s", auth_alias);
+    USP_LOG_Info("AuthenticationKeyID: %d", auth_key_id);
     USP_LOG_Info("AuthenticationKeyFileLocation: %s", auth_key_file);
     USP_LOG_Info("DSCP: %d", dscp);
     USP_LOG_Info("StartSendingRateIndex: %u", start_sending_rate_index);
@@ -1471,45 +1478,184 @@ int Get_IPLCap_SupportedMetrics(dm_req_t *req, char *buf, int len)
 
 /*********************************************************************//**
 **
-** ExtractKeyIDFromAuthAlias
+** AutoPopulate_AuthenticationKeyID
 **
-** Extracts the first number from an Alias value, and checks that it is in range for the Key ID (0-255)
+** Called to get an auto-populated parameter value for Device.IP.Diagnostics.IPLayerCapacityAuthCode.{i}.AuthenticationKeyID
 **
-** \param   auth_alias - pointer to string containing an Alias value. Alias values are supposed to start with a letter
-** \param   pointer to variable in which to return the key_id
-** \param   combined_role - role to use when performing the resolution
+** \param   req - pointer to structure identifying the path
+** \param   buf - pointer to buffer in which to store the value to use to auto-populate the parameter's value
+** \param   len - length of return buffer
 **
-** \return  USP_ERR_OK if successful
+** \return  USP_ERR_OK if auto assigned ID was unique
 **
 **************************************************************************/
-int ExtractKeyIDFromAuthAlias(char *auth_alias, unsigned *key_id)
+int AutoPopulate_AuthenticationKeyID(dm_req_t *req, char *buf, int len)
 {
     int err;
+    int i;
+    char path[MAX_DM_PATH];
+    char value[MAX_DM_SHORT_VALUE_LEN];
+    int auth_key_id;
+    int num_converted;
+    int_vector_t iv;
+    bool auth_key_id_in_use[AUTH_KEY_ID_MAX+1];
 
-    // Exit if unable to extract the first number in AuthenticationAlias
-    err = TEXT_UTILS_StringToFirstUnsigned(auth_alias, key_id);
+    // Exit if unable to get the instances of the IPLayerCapacityAuthCode table
+    err = DATA_MODEL_GetInstances(DEVICE_IPLC_AUTH_ROOT, &iv);
     if (err != USP_ERR_OK)
     {
         return err;
     }
 
-    // Exit if AuthenticationAlias is out of range
-    if (*key_id > 255)
+    // Iterate over all instances in the IPLayerCapacityAuthCode table, building up which AuthenticationKeyIDs are used
+    memset(auth_key_id_in_use, 0, sizeof(auth_key_id_in_use));
+    for (i=0; i < iv.num_entries; i++)
     {
-        USP_ERR_SetMessage("%s: AuthenticationAlias '%s' is out of range 0-255 (%u)", __FUNCTION__, auth_alias, *key_id);
-        return USP_ERR_INVALID_COMMAND_ARGS;
+        // Skip the instance that we're currently setting
+        if (iv.vector[i] == inst1)
+        {
+            continue;
+        }
+
+        // Skip if unable to get the parameter as a string
+        USP_SNPRINTF(path, sizeof(path), "%s.%d.AuthenticationKeyID", DEVICE_IPLC_AUTH_ROOT, iv.vector[i]);
+        err = DATA_MODEL_GetParameterValue(path, value, sizeof(value), 0);
+        if (err != USP_ERR_OK)
+        {
+            continue;
+        }
+
+        // Skip if unable to convert the string to an integer. NOTE: This should never occur
+        num_converted = sscanf(value, "%d", &auth_key_id);
+        if (num_converted != 1)
+        {
+            continue;
+        }
+
+        // Skip if outside range. NOTE: This should never occur
+        if ((auth_key_id < AUTH_KEY_ID_MIN) || (auth_key_id > AUTH_KEY_ID_MAX))
+        {
+            continue;
+        }
+
+        // Mark the auth_key_id as taken
+        auth_key_id_in_use[auth_key_id] = true;
     }
 
-    return USP_ERR_OK;
+    // Iterate over all auth_key_ids, finding the first one that isn't taken
+    for (i=0; i < AUTH_KEY_ID_MAX; i++)
+    {
+        if (auth_key_id_in_use[i] == false)
+        {
+            // Return the value in buf (rather than using val_uint), since this function is also called from Validate_AuthenticationKeyID)
+            USP_SNPRINTF(buf, len, "%d", i);
+            err = USP_ERR_OK;
+            goto exit;
+        }
+    }
+
+    // If the code gets here, then all of the auth_key_ids are taken
+    USP_ERR_SetMessage("%s: No more unused AuthenticationKeyID values in the range %d to %d", __FUNCTION__, AUTH_KEY_ID_MIN, AUTH_KEY_ID_MAX);
+    err = USP_ERR_INVALID_ARGUMENTS;
+
+exit:
+    INT_VECTOR_Destroy(&iv);
+
+    return err;
 }
 
 /*********************************************************************//**
 **
-** LookupKeyByAuthAlias
+** Validate_AuthenticationKeyID
 **
-** Finds the AuthenticationKey matching the specified Alias in Device.IP.Diagnostics.IPLayerCapacityAuthCode.{i}
+** Validates that Device.IP.Diagnostics.IPLayerCapacityAuthCode.{i}.AuthenticationKeyID is unique
+** NOTE: Validation that the new value contains a number has already been performed by the caller
 **
-** \param   auth_alias - pointer to string containing an Alias value. Alias values are supposed to start with a letter
+** \param   req - pointer to structure identifying the subscription
+** \param   value - value that the controller would like to set the Subscription ID to
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int Validate_AuthenticationKeyID(dm_req_t *req, char *value)
+{
+    int i;
+    int err;
+    char path[MAX_DM_PATH];
+    char buf[MAX_DM_SHORT_VALUE_LEN];
+    char default_value[MAX_DM_SHORT_VALUE_LEN];
+    int_vector_t iv;
+
+    // Exit if AuthenticationKeyID is out of range
+    if (val_uint > 255)
+    {
+        USP_ERR_SetMessage("%s: AuthenticationKeyID must be in range %d to %d", __FUNCTION__, AUTH_KEY_ID_MIN, AUTH_KEY_ID_MAX);
+        return USP_ERR_INVALID_ARGUMENTS;
+    }
+
+    // Exit if setting to the same as the default value - we know that this is valid
+    AutoPopulate_AuthenticationKeyID(req, default_value, sizeof(default_value));
+    if (strcmp(value, default_value)==0)
+    {
+        return USP_ERR_OK;
+    }
+
+    // Exit if unable to get the current value of this AuthenticationKeyID in the table
+    err = DATA_MODEL_GetParameterValue(req->path, buf, sizeof(buf), 0);
+    if (err != USP_ERR_OK)
+    {
+        USP_ERR_SetMessage("%s: Failed to get the current value of %s", __FUNCTION__, req->path);
+        return err;
+    }
+
+    // Exit if unable to get the instances of the IPLayerCapacityAuthCode table
+    err = DATA_MODEL_GetInstances(DEVICE_IPLC_AUTH_ROOT, &iv);
+    if (err != USP_ERR_OK)
+    {
+        return err;
+    }
+
+    // Iterate over all instances, checking that the given AuthenticationKeyID does not conflict with any entries in the table
+    for (i=0; i < iv.num_entries; i++)
+    {
+        // Skip the instance that we're currently setting
+        if (iv.vector[i] == inst1)
+        {
+            continue;
+        }
+
+        // Skip if unable to get the parameter as a string
+        USP_SNPRINTF(path, sizeof(path), "%s.%d.AuthenticationKeyID", DEVICE_IPLC_AUTH_ROOT, iv.vector[i]);
+        err = DATA_MODEL_GetParameterValue(path, buf, sizeof(buf), 0);
+        if (err != USP_ERR_OK)
+        {
+            continue;
+        }
+
+        // Exit if the given AuthenticationKeyID conflicts with this table entry
+        if (strcmp(buf, value)==0)
+        {
+            USP_ERR_SetMessage("%s: AuthenticationKeyID (%s) conflicts with entry at %s.%d", __FUNCTION__, value, DEVICE_IPLC_AUTH_ROOT, iv.vector[i]);
+            err = USP_ERR_INVALID_ARGUMENTS;
+            goto exit;
+        }
+    }
+
+    // If the code gets here, then the given AuthenticationKeyID value is unique
+    err = USP_ERR_OK;
+
+exit:
+    INT_VECTOR_Destroy(&iv);
+    return err;
+}
+
+/*********************************************************************//**
+**
+** LookupKeyByAuthKeyID
+**
+** Finds the AuthenticationKey matching the specified AuthenticationKeyID in Device.IP.Diagnostics.IPLayerCapacityAuthCode.{i}
+**
+** \param   auth_key_id - AuthenticationKeyID identifying the instance in the table
 ** \param   buf - pointer to buffer in which to return the Key
 ** \param   len - length of buffer in which to return the Key
 ** \param   combined_role - role to use when performing the resolution
@@ -1517,7 +1663,7 @@ int ExtractKeyIDFromAuthAlias(char *auth_alias, unsigned *key_id)
 ** \return  USP_ERR_OK if successful
 **
 **************************************************************************/
-int LookupKeyByAuthAlias(char *auth_alias, char *buf, int len, combined_role_t *combined_role)
+int LookupKeyByAuthKeyID(int auth_key_id, char *buf, int len, combined_role_t *combined_role)
 {
     int err;
     str_vector_t sv;
@@ -1527,7 +1673,7 @@ int LookupKeyByAuthAlias(char *auth_alias, char *buf, int len, combined_role_t *
 
     // Exit if failed to find the path matching AuthenticationAlias
     // NOTE: Permissions may cause no path to be returned
-    USP_SNPRINTF(path, sizeof(path), "%s.[Alias==\"%s\"].AuthenticationKey", DEVICE_IPLC_AUTH_ROOT, auth_alias);
+    USP_SNPRINTF(path, sizeof(path), "%s.[AuthenticationKeyID==\"%d\"].AuthenticationKey", DEVICE_IPLC_AUTH_ROOT, auth_key_id);
     err = PATH_RESOLVER_ResolvePath(path, &sv, NULL, kResolveOp_Get, FULL_DEPTH, combined_role, DONT_LOG_RESOLVER_ERRORS);
     if (err != USP_ERR_OK)
     {
@@ -1537,7 +1683,7 @@ int LookupKeyByAuthAlias(char *auth_alias, char *buf, int len, combined_role_t *
     // Exit if no path was found
     if (sv.num_entries == 0)
     {
-        USP_ERR_SetMessage("%s: %s does not contain Alias=='%s'", __FUNCTION__, DEVICE_IPLC_AUTH_ROOT, auth_alias);
+        USP_ERR_SetMessage("%s: %s does not contain AuthenticationKeyID=='%d'", __FUNCTION__, DEVICE_IPLC_AUTH_ROOT, auth_key_id);
         err = USP_ERR_INVALID_COMMAND_ARGS;
         goto exit;
     }

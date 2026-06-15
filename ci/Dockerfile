@@ -41,7 +41,7 @@ RUN apt update && apt -y install \
 
 RUN mkdir -p /usr/local/src
 WORKDIR /usr/local/src/
-RUN git clone https://github.com/warmcat/libwebsockets.git libwebsockets
+RUN git clone -b v4.3.3 https://github.com/warmcat/libwebsockets.git libwebsockets
 RUN cd libwebsockets && cmake . && make && make install
 RUN ldconfig
 

@@ -2203,7 +2203,7 @@ void ProcessMessageQueueSocketActivity(socket_set_t *set)
             err = DATA_MODEL_NotifyInstanceAdded(oam->path);
             if (err == USP_ERR_OK)
             {
-                // Send Object creation notifications if object existed in the schema
+                // Ensure that Object creation notifications will be sent later, if a subscription exists
                 DEVICE_SUBSCRIPTION_NotifyObjectLifeEvent(oam->path, kSubNotifyType_ObjectCreation);
 
                 // And update the instance numbers selected by any search expression based permissions

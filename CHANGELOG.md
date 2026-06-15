@@ -1,5 +1,14 @@
 # OB-USP-AGENT Changelog
 
+## 2026-06-15 v11.0.5
+### Fixed
+- IP Capacity speed test reporting low throughput
+
+### Modified
+- Updated IPCapacity() command to TR-181 v2.21 data model (AuthenticationKeyID)
+- MTU input argument for IPCapacity() is restricted to the two starting values supported by the udpst client: 1250 and 1500.
+
+
 ## 2026-06-05 v11.0.4
 ### Added
 - USP_ENDPOINT_ID environment variable to configure EndpointID for OBUSPA
