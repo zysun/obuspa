@@ -164,6 +164,14 @@ void INST_SEL_VECTOR_Fill(inst_sel_vector_t *isv, int num_entries, unsigned shor
 
     USP_ASSERT(isv->vector==NULL);
 
+    // Exit if no entries to fill
+    if (num_entries == 0)
+    {
+        isv->vector = NULL;
+        isv->num_entries = 0;
+        return;
+    }
+
     // Allocate the vector to fill in with entries
     isv->vector = USP_MALLOC(num_entries*sizeof(inst_sel_t *));
     isv->num_entries = num_entries;

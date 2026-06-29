@@ -54,7 +54,7 @@ usp_conformance_1_51   Pass| Get message using search expression search path (in
 usp_conformance_1_52   Pass| Notify - Subscription creation using Value Change
 usp_conformance_1_53   Pass| Notify - Subscription Deletion Using Value Change
 usp_conformance_1_54   Pass| Notification Retry using Value Change
-usp_conformance_1_55   Pass| Subscription Expiration using Value Change
+usp_conformance_1_55  +FAIL| Subscription Expiration using Value Change
 usp_conformance_1_56   Pass| Notification Retry Expiration using Value Change
 usp_conformance_1_57   Pass| ObjectCreation Notification
 usp_conformance_1_58   Pass| ObjectDeletion Notification
@@ -202,7 +202,7 @@ usp_conformance_1_51   Pass| Get message using search expression search path (in
 usp_conformance_1_52   Pass| Notify - Subscription creation using Value Change
 usp_conformance_1_53   Pass| Notify - Subscription Deletion Using Value Change
 usp_conformance_1_54   Pass| Notification Retry using Value Change
-usp_conformance_1_55  +FAIL| Subscription Expiration using Value Change
+usp_conformance_1_55   Pass| Subscription Expiration using Value Change
 usp_conformance_1_56   Pass| Notification Retry Expiration using Value Change
 usp_conformance_1_57   Pass| ObjectCreation Notification
 usp_conformance_1_58   Pass| ObjectDeletion Notification
@@ -288,7 +288,7 @@ usp_conformance_11_4   Pass| MQTT 5.0 ClientID
 usp_conformance_11_5   Pass| MQTT ClientID Persistence
 usp_conformance_11_6   Pass| MQTT Message Retry
 usp_conformance_11_7   Pass| MQTT Keep Alive
-usp_conformance_11_8  +FAIL| MQTT SUBSCRIBE Packet
+usp_conformance_11_8   Pass| MQTT SUBSCRIBE Packet
 usp_conformance_11_9   Pass| MQTT New Subscription
 usp_conformance_11_10  Pass| MQTT No Topic in CONNACK
 usp_conformance_11_11  Pass| MQTT Failure to Subscribe

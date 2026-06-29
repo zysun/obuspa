@@ -63,7 +63,7 @@ typedef struct
 //------------------------------------------------------------------------------
 // API
 int WSCLIENT_Init(void);
-void WSCLIENT_Destroy(void);
+void WSCLIENT_Destroy(bool purge_msg_queue);
 int WSCLIENT_Start(void);
 void WSCLIENT_StartClient(int cont_instance, int mtp_instance, char *cont_endpoint_id, wsclient_config_t *config);
 void WSCLIENT_StopClient(int cont_instance, int mtp_instance);
@@ -73,6 +73,7 @@ void WSCLIENT_QueueBinaryMessage(mtp_send_item_t *msi, int cont_instance, int mt
 unsigned WSCLIENT_GetRetryCount(int cont_instance, int mtp_instance);
 void *WSCLIENT_Main(void *args);
 bool WSCLIENT_IsEndpointConnected(char *endpoint_id);
+void WSCLIENT_ForceTrustStoreReload(void);
 
 //------------------------------------------------------------------------------
 // Exported global variables

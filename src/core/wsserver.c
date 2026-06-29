@@ -135,11 +135,13 @@ bool is_wsserv_mtp_shutdown = false;
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
 int HandleAllWssEvents(struct lws *handle, enum lws_callback_reasons event, void *per_session_data, void *event_args, size_t event_args_len);
+int HandleWssEvent_WsiCreate(struct lws *handle);
 int HandleWssEvent_NewClient(struct lws *handle);
 int HandleWssEvent_Established(struct lws *handle);
 int HandleWssEvent_Receive(struct lws *handle, unsigned char *chunk, int chunk_len);
 int HandleWssEvent_Transmit(struct lws *handle);
 wsconn_t *FindFreeWsConnection(void);
+wsconn_t *FindWsConnectionByHandle(struct lws *handle);
 wsconn_t *FindWsConnectionByConnId(int conn_id);
 wsconn_t *FindWsConnectionByEndpointId(char *endpoint_id);
 void RemoveWsservSendItem(wsconn_t *wc, wsserv_send_item_t *si);
@@ -847,7 +849,7 @@ int StartWebsockServer(wsserv_config_t *config)
         USP_LOG_Error("%s: lws_create_context() failed", __FUNCTION__);
         return USP_ERR_INTERNAL_ERROR;
     }
-    USP_LOG_Info("%s: Started Websocket server listening on interface=%s", __FUNCTION__, wsserv.wan_addr);
+    USP_LOG_Info("%s: Started Websocket server listening on interface=%s (port=%d)", __FUNCTION__, wsserv.wan_addr, config->port);
 
     // Indicate that the server is now started, and initialise rest of fields
     CopyWssConfig(&wsserv.cur_config, config);
@@ -976,12 +978,15 @@ int HandleAllWssEvents(struct lws *handle, enum lws_callback_reasons event, void
             result = HandleWssEvent_VerifyCerts(handle, event_args, event_args_len, per_session_data);
             break;
 
+        case LWS_CALLBACK_WSI_CREATE:
+            tr_event("WS server: LWS_CALLBACK_WSI_CREATE");
+            result = HandleWssEvent_WsiCreate(handle);
+            break;
 
         case LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED:
             tr_event("WS server: LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED");
             result = HandleWssEvent_NewClient(handle);
             break;
-
 
         case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
             tr_event("WS server: LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION");
@@ -1053,7 +1058,7 @@ int HandleWssEvent_Destroyed(struct lws *handle)
     wsserv_send_item_t *si;
 
     // Exit if nothing to free
-    wc = lws_get_opaque_user_data(handle);
+    wc = FindWsConnectionByHandle(handle);
     if (wc == NULL)
     {
         return 0;
@@ -1083,9 +1088,9 @@ int HandleWssEvent_Destroyed(struct lws *handle)
 
 /*********************************************************************//**
 **
-** HandleWssEvent_NewClient
+** HandleWssEvent_WsiCreate
 **
-** Called from the LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED event
+** Called from the LWS_CALLBACK_WSI_CREATE event
 ** in response to a controller connecting to the agent's websocket server
 **
 ** \param   handle - libwebsockets handle identifying the connection with activity on it
@@ -1093,7 +1098,7 @@ int HandleWssEvent_Destroyed(struct lws *handle)
 ** \return  0 if successful, -1 otherwise
 **
 **************************************************************************/
-int HandleWssEvent_NewClient(struct lws *handle)
+int HandleWssEvent_WsiCreate(struct lws *handle)
 {
     wsconn_t *wc;
 
@@ -1116,6 +1121,8 @@ int HandleWssEvent_NewClient(struct lws *handle)
     wc->send_ping = false;
     wc->ping_count = 0;
     wc->disconnect_sent = false;
+    wc->is_peer_an_eid = false;
+    USP_STRNCPY(wc->peer, "unknown", sizeof(wc->peer));
 
     // Assign a unique server handle for this connection
     wc->conn_id = conn_id_counter++;
@@ -1124,14 +1131,37 @@ int HandleWssEvent_NewClient(struct lws *handle)
         conn_id_counter = 0;
     }
 
+    return 0;
+}
+
+/*********************************************************************//**
+**
+** HandleWssEvent_NewClient
+**
+** Called from the LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED event
+** in response to a controller connecting to the agent's websocket server
+**
+** \param   handle - libwebsockets handle identifying the connection with activity on it
+**
+** \return  0 if successful, -1 otherwise
+**
+**************************************************************************/
+int HandleWssEvent_NewClient(struct lws *handle)
+{
+    wsconn_t *wc;
+
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Warning("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
+
     // Determine the IP address of the peer to use in debug. This will be overridden with endpoint_id if present in EID URI query string
     // NOTE: libwebsockets insists on using a IPv4 mapped IPv6 address to represent IPv4 addresses
-    wc->is_peer_an_eid = false;
     lws_get_peer_simple(handle, wc->peer, sizeof(wc->peer));
     USP_LOG_Info("%s: %s is attempting to connect", __FUNCTION__, wc->peer);
-
-    // Associate the websocket connection handle with our websocket connection structure
-    lws_set_opaque_user_data(handle, wc);
 
     return 0;
 }
@@ -1188,8 +1218,13 @@ int HandleWssEvent_VerifyCerts(struct lws *handle, SSL *ssl, int preverify_ok, X
     int verify_ok;
     STACK_OF(X509) *cert_chain = NULL;
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return 1;
+    }
 
     // If we have a certificate chain, then determine which role to allow for the controller on the Websocket connection
     verify_ok = DEVICE_SECURITY_TrustCertVerifyCallbackWithCertChain(preverify_ok, x509_ctx, &cert_chain);
@@ -1317,8 +1352,13 @@ int HandleWssEvent_Established(struct lws *handle)
     wsconn_t *other_wc;
     char endpoint_id[MAX_ENDPOINT_ID_LEN];
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
 
     // Exit if unable to get the path from the websocket URL that the controller was connecting to
     len = lws_hdr_copy(handle, rxed_path, sizeof(rxed_path), WSI_TOKEN_GET_URI);
@@ -1400,8 +1440,13 @@ int HandleWssEvent_Receive(struct lws *handle, unsigned char *chunk, int chunk_l
     wsconn_t *wc;
     int new_len;
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
 
     // No need to receive a PONG packet, if we received some other packet signalling keep alive
     wc->ping_count = 0;
@@ -1487,8 +1532,13 @@ int HandleWssEvent_Transmit(struct lws *handle)
     unsigned char tx_buf[LWS_PRE + TX_CHUNK_SIZE];
     unsigned write_flags;
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
 
     // Exit, causing the websocket to close if a disconnect frame has just been sent
     if (wc->disconnect_sent)
@@ -1603,8 +1653,13 @@ int HandleWssEvent_PingTimer(struct lws *handle)
     int err;
     wsconn_t *wc;
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
 
     // Exit if failed to ask libwebsockets for permission to send the ping
     err = lws_callback_on_writable(handle);
@@ -1640,8 +1695,13 @@ int HandleWssEvent_PongReceived(struct lws *handle)
 {
     wsconn_t *wc;
 
-    wc = lws_get_opaque_user_data(handle);
-    USP_ASSERT(wc != NULL);
+    // Exit if unable to find our connection
+    wc = FindWsConnectionByHandle(handle);
+    if (wc == NULL)
+    {
+        USP_LOG_Error("%s: Unable to find connection, so closing it", __FUNCTION__);
+        return -1;
+    }
 
     // Reset the count of consecutive pings sent without any pongs
     USP_LOG_Debug("%s: Received PONG at time %d from %s", __FUNCTION__, (int)time(NULL), wc->peer);
@@ -1947,13 +2007,42 @@ wsconn_t *FindFreeWsConnection(void)
 
 /*********************************************************************//**
 **
+** FindWsConnectionByHandle
+**
+** Finds the connection matching the specified libwebsockets handle
+**
+** \param   conn_id - handle uniquely identifying connection
+**
+** \return  pointer to entry in ws_connections[] or NULL, if no matching entry found
+**
+**************************************************************************/
+wsconn_t *FindWsConnectionByHandle(struct lws *handle)
+{
+    int i;
+    wsconn_t *wc;
+
+    for (i=0; i<NUM_ELEM(ws_connections); i++)
+    {
+        wc = &ws_connections[i];
+        if (wc->ws_handle == handle)
+        {
+            return wc;
+        }
+    }
+
+    // If the code gets here, then no matching entry was found
+    return NULL;
+}
+
+/*********************************************************************//**
+**
 ** FindWsConnectionByConnId
 **
 ** Finds the connection matching the specified conn_id
 **
 ** \param   conn_id - handle uniquely identifying connection
 **
-** \return  pointer to entry in ws_connections[] or NULL, if no free entries left
+** \return  pointer to entry in ws_connections[] or NULL, if no matching entry found
 **
 **************************************************************************/
 wsconn_t *FindWsConnectionByConnId(int conn_id)
@@ -1982,7 +2071,7 @@ wsconn_t *FindWsConnectionByConnId(int conn_id)
 **
 ** \param   conn_id - handle uniquely identifying connection
 **
-** \return  pointer to entry in ws_connections[] or NULL, if no free entries left
+** \return  pointer to entry in ws_connections[] or NULL, if no matching entry found
 **
 **************************************************************************/
 wsconn_t *FindWsConnectionByEndpointId(char *endpoint_id)

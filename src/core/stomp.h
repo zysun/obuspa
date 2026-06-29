@@ -98,6 +98,7 @@ mtp_status_t STOMP_GetMtpStatus(int instance);
 char *STOMP_GetConnectionStatus(int instance, time_t *last_change_date);
 void STOMP_UpdateRetryParams(int instance, stomp_retry_params_t *retry_params);
 void STOMP_GetDestinationFromServer(int instance, char *buf, int len);
+int STOMP_ForceTrustStoreReload(void);
 
 
 // Readability definitions for 'purge_queued_messages' argument of STOMP_StopConnection()

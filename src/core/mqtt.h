@@ -171,5 +171,6 @@ void MQTT_InitConnParams(mqtt_conn_params_t* params);
 void MQTT_DestroyConnParams(mqtt_conn_params_t* params);
 int MQTT_GetAgentResponseTopicDiscovered(int instance, char *buf, int len);
 void MQTT_AllowConnect(void);
+int MQTT_ForceTrustStoreReload(void);
 
 #endif

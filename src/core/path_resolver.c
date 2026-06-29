@@ -2272,10 +2272,19 @@ int CheckPathProperties(char *path, resolver_state_t *state, bool *add_to_vector
             }
             break;
 
+
+        case kResolveOp_Instances:
+            // Exit if the path does not represent a multi-instance object
+            if ((property_flags & PP_IS_MULTI_INSTANCE_OBJECT)==0)
+            {
+                USP_ERR_SetMessage("%s: Path (%s) is not a multi-instance object", __FUNCTION__, path);
+                return USP_ERR_NOT_A_TABLE;
+            }
+            break;
+
         case kResolveOp_Set:
         case kResolveOp_Add:
         case kResolveOp_Del:
-        case kResolveOp_Instances:
         case kResolveOp_SubsAdd:
         case kResolveOp_SubsDel:
             // Exit if the path does not represent an object

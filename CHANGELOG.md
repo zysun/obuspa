@@ -1,5 +1,23 @@
 # OB-USP-AGENT Changelog
 
+## 2026-06-29 v11.0.6
+### Fixed
+- Race hazard in Websockets server MTP that caused an assert
+- Setting a permission Target to empty string causes an assert
+- BBF CI Bitbucket pipeline Test 11.8 failure (bad CI configuration - no code changes)
+- USP Broker should not compare values in SetResponse with those in SetRequest (as they may have been normalized e.g. booleans)
+- GetInstances on a single instance object should return an error
+- Empty path segments (paths containing ".." eg. Device.DeviceInfo..UpTime) should generate an error
+
+
+### Added
+- Trust store and client certificates used by STOMP and MQTT MTPs are automatically updated after AddCertificate().
+  The new certificates are used upon reconnection but do not result in destruction of existing connections.
+- Websockets server & client MTPs may also optionally be updated by defining FORCE_RELOAD_WEBSOCKETS in device_security.c.
+  Websockets connections are automatically restarted, resulting in destruction of existing connections.
+- Increased the default maximum number of USP Controllers to 10
+
+
 ## 2026-06-15 v11.0.5
 ### Fixed
 - IP Capacity speed test reporting low throughput

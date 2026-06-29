@@ -866,6 +866,48 @@ void DEVICE_MTP_StartMtpServers(void)
     }
 }
 
+#ifdef ENABLE_WEBSOCKETS
+/*********************************************************************//**
+**
+** DEVICE_MTP_RestartAllWSServerConnectionsWithNewTrustStore
+**
+** Tears down then restarts the Websocket server with new client cert and trust store certs
+** NOTE: The new trust store certs and client certs must have been updated in device_security.c prior to calling this function
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void DEVICE_MTP_RestartAllWSServerConnectionsWithNewTrustStore(void)
+{
+    int i;
+    agent_mtp_t *mtp;
+
+    // Iterate over all agent MTPs, restarting all enabled websocket servers
+    for (i=0; i<MAX_AGENT_MTPS; i++)
+    {
+        mtp = &agent_mtps[i];
+        if ((mtp->instance != INVALID) && (mtp->enable))
+        {
+            switch(mtp->protocol)
+            {
+#ifdef ENABLE_WEBSOCKETS
+                case kMtpProtocol_WebSockets:
+                    WSSERVER_EnableServer(&mtp->websock);
+                    WSSERVER_ActivateScheduledActions();
+                    break;
+#endif
+
+                default:
+                    // Do nothing for other MTPs
+                    break;
+            }
+        }
+    }
+}
+#endif
+
 /*********************************************************************//**
 **
 ** ValidateAdd_AgentMtp

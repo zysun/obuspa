@@ -46,6 +46,7 @@
 #include <time.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
 
 #include "common_defs.h"
 #include "device.h"
@@ -246,6 +247,7 @@ void StartAllMtpClients(void);
 void PollCanMtpConnect(int id);
 bool UpdateCanMtpConnect(void);
 void StartAllWebsocketClients(void);
+void StopAllWebsocketClients(void);
 void StartAllCoAPClients(void);
 void AllowConnectOnAllMtpClients(void);
 void UpdateNextPeriodicTime(void);
@@ -1670,6 +1672,32 @@ void DEVICE_CONTROLLER_StartAllMtpClients(void)
     }
 }
 
+#ifdef ENABLE_WEBSOCKETS
+/*********************************************************************//**
+**
+** DEVICE_CONTROLLER_RestartAllWSClientConnectionsWithNewTrustStore
+**
+** Tears down then restarts all enabled Websocket client connections with new client cert and trust store certs
+** NOTE: The new trust store certs and client certs must have been updated in device_security.c prior to calling this function
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void DEVICE_CONTROLLER_RestartAllWSClientConnectionsWithNewTrustStore(void)
+{
+    StopAllWebsocketClients();
+    WSCLIENT_ForceTrustStoreReload();
+
+    // Wait some time for the WS client thread to tear down and re-create a new libwebsocket lws context
+    // If we don't do this, then there's a possibility that StartAllWebsocketClients() could end up accessing the old lws context after it's been deleted
+    sleep(1);
+
+    StartAllWebsocketClients();
+}
+#endif
+
 /*********************************************************************//**
 **
 ** StartAllMtpClients
@@ -1773,6 +1801,44 @@ void StartAllWebsocketClients(void)
                 if ((mtp->instance != INVALID) && (mtp->enable) && (mtp->protocol == kMtpProtocol_WebSockets))
                 {
                     WSCLIENT_StartClient(cont->instance, mtp->instance, cont->endpoint_id, &mtp->websock);
+                    // NOTE: Intentionally ignoring error, as there's nothing we can do, and we'd like to continue starting any other CoAP clients
+                }
+            }
+        }
+    }
+}
+
+/*********************************************************************//**
+**
+** StopAllWebsocketClients
+**
+** Called to stop all enabled Websocket clients in the Controller MTP table
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void StopAllWebsocketClients(void)
+{
+    int i;
+    int j;
+    controller_t *cont;
+    controller_mtp_t *mtp;
+
+    // Iterate over all controllers
+    for (i=0; i<MAX_CONTROLLERS; i++)
+    {
+        // Iterate over all MTP slots for this controller
+        cont = &controllers[i];
+        if ((cont->instance != INVALID) && (cont->enable))
+        {
+            for (j=0; j<MAX_CONTROLLER_MTPS; j++)
+            {
+                mtp = &cont->mtps[j];
+                if ((mtp->instance != INVALID) && (mtp->enable) && (mtp->protocol == kMtpProtocol_WebSockets))
+                {
+                    WSCLIENT_StopClient(cont->instance, mtp->instance);
                     // NOTE: Intentionally ignoring error, as there's nothing we can do, and we'd like to continue starting any other CoAP clients
                 }
             }

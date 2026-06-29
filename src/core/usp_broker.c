@@ -256,7 +256,6 @@ int CalcFailureIndex(Usp__Msg *resp, kv_vector_t *params, int *modified_err);
 int ProcessAddResponse(Usp__Msg *resp, char *path, int *instance, int num_instances, kv_vector_t *unique_keys, group_add_param_t *params, int num_params);
 int ProcessSetResponse(Usp__Msg *resp, kv_vector_t *params, int *failure_index);
 void LogSetResponse_OperFailure(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationFailure *oper_failure);
-bool CheckSetResponse_OperSuccess(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success, kv_vector_t *params);
 void PropagateParamErr(char *path, int err_code, char *err_msg, group_add_param_t *params, int num_params);
 int ValidateAddResponsePath(char *schema_path, char *instantiated_path, int *instance);
 int ProcessDeleteResponse(Usp__Msg *resp, str_vector_t *paths, int *failure_index);
@@ -1832,6 +1831,13 @@ int USP_BROKER_AttemptDirectGet(char *path, str_vector_t *unresolved_params, int
     unsigned short permission_bitmask;
     kv_pair_t *kv;
     int base_depth;
+
+    // Exit if path contains any path separators with no intervening objects
+    if (strstr(path, "..") != NULL)
+    {
+        USP_ERR_SetMessage("%s: Path should not contain '..'", __FUNCTION__);
+        return USP_ERR_INVALID_PATH_SYNTAX;
+    }
 
     // Initialize output vector and internal vectors/arrays
     STR_VECTOR_Init(unresolved_params);
@@ -4797,7 +4803,7 @@ int ProcessSetResponse(Usp__Msg *resp, kv_vector_t *params, int *failure_index)
     Usp__SetResp *set;
     Usp__SetResp__UpdatedObjectResult *obj_result;
     Usp__SetResp__UpdatedObjectResult__OperationStatus *oper_status;
-    bool is_success = false;
+    bool is_success = true;
 
     // Default to indicating that all parameters failed
     *failure_index = INVALID;
@@ -4825,23 +4831,12 @@ int ProcessSetResponse(Usp__Msg *resp, kv_vector_t *params, int *failure_index)
     {
         obj_result = set->updated_obj_results[i];
         oper_status = obj_result->oper_status;
-        switch(oper_status->oper_status_case)
+
+        if (oper_status->oper_status_case == USP__SET_RESP__UPDATED_OBJECT_RESULT__OPERATION_STATUS__OPER_STATUS_OPER_FAILURE)
         {
-            case USP__SET_RESP__UPDATED_OBJECT_RESULT__OPERATION_STATUS__OPER_STATUS_OPER_SUCCESS:
-                // Check that the parameters and values reported as being set, match the ones we requested
-                // NOTE: This code does not verify that we got a success response for EVERY param that we requested, only that the ones indicated in the response were ones we requested
-                is_success = CheckSetResponse_OperSuccess(oper_status->oper_success, params);
-                break;
-
-            case USP__SET_RESP__UPDATED_OBJECT_RESULT__OPERATION_STATUS__OPER_STATUS_OPER_FAILURE:
-                // Log all failures. NOTE: We should have received an Error response instead, if the USP Service was implemented correctly
-                is_success = false;
-                LogSetResponse_OperFailure(oper_status->oper_failure);
-                break;
-
-            default:
-                TERMINATE_BAD_CASE(oper_status->oper_status_case);
-                break;
+            // Log all failures. NOTE: We should have received an Error response instead, if the USP Service was implemented correctly
+            is_success = false;
+            LogSetResponse_OperFailure(oper_status->oper_failure);
         }
     }
 
@@ -4849,71 +4844,6 @@ int ProcessSetResponse(Usp__Msg *resp, kv_vector_t *params, int *failure_index)
 
     return err;
 }
-
-/*********************************************************************//**
-**
-** CheckSetResponse_OperSuccess
-**
-** Checks the OperSucces object in the SetResponse, ensuring that the parameters were set to the expected values
-**
-** \param   oper_success - OperSuccess object to check
-** \param   params - key-value vector containing the parameters (and values) that we expected to be set
-**
-** \return  true if no errors were detected in the set response
-**
-**************************************************************************/
-bool CheckSetResponse_OperSuccess(Usp__SetResp__UpdatedObjectResult__OperationStatus__OperationSuccess *oper_success, kv_vector_t *params)
-{
-    int i, j;
-    Usp__SetResp__UpdatedInstanceResult *updated_inst_result;
-    Usp__SetResp__UpdatedInstanceResult__UpdatedParamsEntry *updated_param;
-    Usp__SetResp__ParameterError *param_err;
-    char path[MAX_DM_PATH];
-    bool is_success = true;
-    int index;
-    char *expected_value;
-
-    for (i=0; i < oper_success->n_updated_inst_results; i++)
-    {
-        updated_inst_result = oper_success->updated_inst_results[i];
-
-        // Log all errors (for non-required parameters)
-        // NOTE: We should not get any of these, as we marked all params as required in the request
-        for (j=0; j < updated_inst_result->n_param_errs; j++)
-        {
-            param_err = updated_inst_result->param_errs[j];
-            USP_ERR_SetMessage("%s: SetResponse returned err=%d for param=%s%s but should have returned ERROR Response", __FUNCTION__, param_err->err_code, updated_inst_result->affected_path, param_err->param);
-            is_success = false;
-        }
-
-        // Check that the USP Service hasn't set the wrong value for any params
-        for (j=0; j < updated_inst_result->n_updated_params; j++)
-        {
-            updated_param = updated_inst_result->updated_params[j];
-            USP_SNPRINTF(path, sizeof(path), "%s%s", updated_inst_result->affected_path, updated_param->key);
-
-            // Skip if this param was not one we requested to be set
-            index = KV_VECTOR_FindKey(params, path, 0);
-            if (index == INVALID)
-            {
-                USP_ERR_SetMessage("%s: SetResponse contained a success entry for param=%s but we never requested it to be set", __FUNCTION__, path);
-                is_success = false;
-                continue;
-            }
-
-            // Check that the parameter was set to the expected value
-            expected_value = params->vector[index].value;
-            if (strcmp(expected_value, updated_param->value) != 0)
-            {
-                USP_ERR_SetMessage("%s: SetResponse contained the wrong value for param=%s (expected='%s', got='%s')", __FUNCTION__, path, expected_value, updated_param->key);
-                is_success = false;
-            }
-        }
-    }
-
-    return is_success;
-}
-
 
 /*********************************************************************//**
 **

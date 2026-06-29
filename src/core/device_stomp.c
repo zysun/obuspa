@@ -453,6 +453,47 @@ int DEVICE_STOMP_CountEnabledConnections(void)
 
 /*********************************************************************//**
 **
+** DEVICE_STOMP_RestartAllCconnectionsWithNewTrustStore
+**
+** Tears down then restarts all enabled STOMP connections with new client cert and trust store certs
+** NOTE: The new trust store certs and client certs must have been updated in device_security.c prior to calling this function
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void DEVICE_STOMP_RestartAllConnectionsWithNewTrustStore(void)
+{
+    int i;
+    stomp_conn_params_t *sp;
+
+    // Iterate over all enabled STOMP connections, stopping them
+    for (i=0; i<MAX_STOMP_CONNECTIONS; i++)
+    {
+        sp = &stomp_conn_params[i];
+        if ((sp->instance != INVALID) && (sp->enable == true))
+        {
+            STOMP_DisableConnection(sp->instance, PURGE_QUEUED_MESSAGES);
+        }
+    }
+
+    // Load the new truststore certs and client cert into the STOMP SSL context
+    STOMP_ForceTrustStoreReload();
+
+    // Iterate over all enabled STOMP connections, restarting them
+    for (i=0; i<MAX_STOMP_CONNECTIONS; i++)
+    {
+        sp = &stomp_conn_params[i];
+        if ((sp->instance != INVALID) && (sp->enable == true))
+        {
+            EnableStompConnection(sp);
+        }
+    }
+}
+
+/*********************************************************************//**
+**
 ** ValidateAdd_StompConn
 **
 ** Function called to determine whether a new STOMP connection may be added

@@ -59,7 +59,7 @@
 #define MAX_COMPOUND_KEY_PARAMS 4   // Maximum number of parameters in a compound unique key
 #define MAX_SEARCH_KEYS 10          // Maximum number of parameters in a search expression
 
-#define MAX_CONTROLLERS 5           // Maximum number of controllers which may be present in the DB (Device.LocalAgent.Controller.{i})
+#define MAX_CONTROLLERS 10           // Maximum number of controllers which may be present in the DB (Device.LocalAgent.Controller.{i})
 #define MAX_CONTROLLER_MTPS 3       // Maximum number of MTPs that a controller may have in the DB (Device.LocalAgent.Controller.{i}.MTP.{i})
 #define MAX_AGENT_MTPS (MAX_CONTROLLERS)  // Maximum number of MTPs that an agent may have in the DB (Device.LocalAgent.MTP.{i})
 #define MAX_STOMP_CONNECTIONS (MAX_CONTROLLERS)  // Maximum number of STOMP connections that an agent may have in the DB (Device.STOMP.Connection.{i})
@@ -81,9 +81,11 @@
 // Refer to the syslog documentation and its priority argument to know the possible values.
 //#define SYSLOG_SEVERITY_OVERRIDE LOG_ERR
 
-// NB: If you change this, you must also change the SSL callback functions within mqtt.c
-// This will compile fail if you do not
-#define MAX_MQTT_CLIENTS (5)  // Maximum number of MQTT Client Connections (Device.MQTT.Client.{i})
+// Maximum number of MQTT Client Connections (Device.MQTT.Client.{i})
+// NOTE: If you change this, you must also change the SSL callback functions within mqtt.c (mqtt_verify_callbacks)
+// NOTE: This also needs to match the number of controllers connected to MQTT, even if all controllers are using the same MQTT client
+// connection. This is because it is too complex for the code to take this into account in ValidateMtpResourceAvailable()
+#define MAX_MQTT_CLIENTS (10)
 
 // Maximum number of bytes allowed in a USP protobuf message.
 // This is not used to size any arrays, just used as a security measure to prevent rogue controllers crashing

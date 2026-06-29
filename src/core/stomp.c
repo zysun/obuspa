@@ -1272,6 +1272,46 @@ exit:
 
 /*********************************************************************//**
 **
+** STOMP_ForceTrustStoreReload
+**
+** Reloads the trust store used by STOMP
+** All further connections and reconnections (eg initiated by DEVICE_STOMP_ScheduleReconnect)
+** will use the new trust store and agent cert
+** NOTE: It is safe to call this whilst connected. SSL contexts are reference counted, so any
+**       existing SSL connections will continue to use the old SSL context until the SSL connection is freed.
+**
+** \param   None
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int STOMP_ForceTrustStoreReload(void)
+{
+    int err = USP_ERR_OK;
+
+    OS_UTILS_LockMutex(&stomp_access_mutex);
+
+    // Free the OpenSSL context
+    if (stomp_ssl_ctx != NULL)
+    {
+        SSL_CTX_free(stomp_ssl_ctx);
+        stomp_ssl_ctx = NULL;
+    }
+
+    // Create the SSL context with trust store and client cert loaded
+    stomp_ssl_ctx = DEVICE_SECURITY_CreateSSLContext(SSLv23_client_method(), SSL_VERIFY_PEER, DEVICE_SECURITY_TrustCertVerifyCallback);
+    if (stomp_ssl_ctx == NULL)
+    {
+        err = USP_ERR_INTERNAL_ERROR;
+    }
+
+    OS_UTILS_UnlockMutex(&stomp_access_mutex);
+
+    return err;
+}
+
+/*********************************************************************//**
+**
 ** StartStompConnection
 **
 ** TCP Connects to the specified STOMP connection

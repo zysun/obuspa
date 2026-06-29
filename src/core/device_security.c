@@ -59,6 +59,7 @@
 
 #include "common_defs.h"
 #include "stomp.h"
+#include "mqtt.h"
 #include "data_model.h"
 #include "usp_api.h"
 #include "device.h"
@@ -257,6 +258,7 @@ int CalcNextMutableCertInstance(void);
 int GetAliasFromMutableCertFile(char *file_path, char *buf, int len);
 int GetCert_Alias(dm_req_t *req, char *buf, int len);
 cert_t *Find_LocalAgentCertByAlias(char *alias);
+void ForceTrustStoreReload(void);
 #endif
 
 /*********************************************************************//**
@@ -3559,6 +3561,9 @@ int Operate_AddCertificate(dm_req_t *req, char *command_key, kv_vector_t *input_
         return USP_ERR_INTERNAL_ERROR;
     }
 
+    // Reload the trust store used by each MTP. New connections will use the new trust store.
+    ForceTrustStoreReload();
+
     return USP_ERR_OK;
 }
 
@@ -3640,6 +3645,9 @@ int Operate_DeleteCertificate(dm_req_t *req, char *command_key, kv_vector_t *inp
 
     // Zero out the entry in Device.LocalAgent.ControllerTrust.Credential.{i}.Credential
     DEVICE_CTRUST_DeleteCertRole(instance);
+
+    // Reload the trust store used by each MTP. New connections will use the new trust store.
+    ForceTrustStoreReload();
 
     return USP_ERR_OK;
 }
@@ -3783,6 +3791,42 @@ exit:
     }
 
     return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** ForceTrustStoreReload
+**
+** Reloads the trust stores used by MQTT and STOMP.
+** When the MTP next connects (due to a retry or ForceReconnect command), the new trust store will be used
+** NOTE: By default, this function does not update the trust store used by websockets connections
+**       Define FORCE_RELOAD_WEBSOCKETS, if you want it to
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void ForceTrustStoreReload(void)
+{
+#ifndef DISABLE_STOMP
+    STOMP_ForceTrustStoreReload();
+#endif
+
+#ifdef ENABLE_MQTT
+    MQTT_ForceTrustStoreReload();
+#endif
+
+// NOTE: Libwebsockets does not provide a public API (or expose structures) to do this, so we have to tear down the whole libwebsocket context and recreate
+//       As this is destructive (restarting all websocket connections), the code does not do this by default
+//       If you want to do this, uncomment the following line
+//#define FORCE_RELOAD_WEBSOCKETS
+#ifdef FORCE_RELOAD_WEBSOCKETS
+#ifdef ENABLE_WEBSOCKETS
+    DEVICE_CONTROLLER_RestartAllWSClientConnectionsWithNewTrustStore();
+    DEVICE_MTP_RestartAllWSServerConnectionsWithNewTrustStore();
+#endif
+#endif
 }
 
 /*********************************************************************//**

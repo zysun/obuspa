@@ -204,7 +204,6 @@ static challenge_table_t *challenge_table = NULL;
 #endif // REMOVE_DEVICE_SECURITY
 //------------------------------------------------------------------------------
 // Forward declarations. Note these are not static, because we need them in the symbol table for USP_LOG_Callstack() to show them
-void AddInternalRolePermission(role_t *role, unsigned order, char *path, unsigned permission_bitmask);
 role_t *Process_CTrustRoleAdded(int role_instance);
 int Process_CTrustPermAdded(role_t *role, int perm_instance);
 int ExtractPermissions(role_t *role, permission_t *perm, char *param_name, unsigned short read_perm, unsigned short write_perm, unsigned short exec_perm, unsigned short notify_perm);
@@ -1333,7 +1332,7 @@ int Validate_CTrustPermTargets(dm_req_t *req, char *value)
     STR_VECTOR_Init(&targets);
     TEXT_UTILS_SplitString(value, &targets, ",");
 
-    err = ValidatePermTargetsVector(&targets, NULL, 0);  // NOTE: We don't care about the pemission bitmask to use, because it is only used in isv, which we aren't getting
+    err = ValidatePermTargetsVector(&targets, NULL, 0);  // NOTE: We don't care about the permission bitmask to use, because it is only used in isv, which we aren't getting
 
     STR_VECTOR_Destroy(&targets);
 
@@ -1610,35 +1609,6 @@ int Notify_CTrustPermCmdEvent(dm_req_t *req, char *value)
 
 /*********************************************************************//**
 **
-** AddInternalRolePermission
-**
-** Adds a permission to an internal role
-**
-** \param   role - role to add the permission to
-** \param   order - order of the role to add. Note this must be more than all previous permissions added for this role
-** \param   path - data model path that the permission applies to
-** \param   permission_bitmask - bitmask of permissions to add
-**
-** \return  USP_ERR_OK if successful
-**
-**************************************************************************/
-void AddInternalRolePermission(role_t *role, unsigned order, char *path, unsigned permission_bitmask)
-{
-    permission_t *perm;
-
-    perm = USP_MALLOC(sizeof(permission_t));
-    memset(perm, 0, sizeof(permission_t));
-    perm->instance = INVALID;
-    perm->enable = true;
-    perm->order = order;
-    STR_VECTOR_Init(&perm->targets);
-    STR_VECTOR_Add(&perm->targets, path);
-    perm->permission_bitmask = permission_bitmask;
-    DLLIST_LinkToTail(&role->permissions, perm);
-}
-
-/*********************************************************************//**
-**
 ** Process_CTrustRoleAdded
 **
 ** Reads a Role instance from Device.LocalAgent.ControllerTrust.Role.{i} into the internal data structure
@@ -1877,18 +1847,18 @@ int ValidatePermTargetsVector(str_vector_t *targets, inst_sel_vector_t *isv, uns
 
     STR_VECTOR_Init(&path_segments);
 
-    // Exit if there are no targets, this is valid
-    if (targets->num_entries == 0)
-    {
-        err = USP_ERR_OK;
-        goto exit;
-    }
-
     // Create default permission instances for every target
     if (isv != NULL)
     {
         INST_SEL_VECTOR_Destroy(isv, true);
         INST_SEL_VECTOR_Fill(isv, targets->num_entries, MODIFIED_PERM(permission_bitmask));
+    }
+
+    // Exit if there are no targets, this is valid
+    if (targets->num_entries == 0)
+    {
+        err = USP_ERR_OK;
+        goto exit;
     }
 
     // Check all of the targets in the vector

@@ -260,6 +260,7 @@ void QueueUspRecord_MQTT(mqtt_client_t *client, mtp_send_item_t *msi, char *cont
 void MqttSubscriptionReplace(mqtt_subscription_t *dest, mqtt_subs_config_t *src);
 void MqttSubscriptionDestroy(mqtt_subscription_t *sub);
 void SaveMqttPublishErrMsg(const char *fmt, ...);
+int InitMqttSSLContexts(void);
 
 //------------------------------------------------------------------------------------
 #define DEFINE_MQTT_TrustCertVerifyCallbackIndex(index) \
@@ -275,6 +276,11 @@ DEFINE_MQTT_TrustCertVerifyCallbackIndex(1);
 DEFINE_MQTT_TrustCertVerifyCallbackIndex(2);
 DEFINE_MQTT_TrustCertVerifyCallbackIndex(3);
 DEFINE_MQTT_TrustCertVerifyCallbackIndex(4);
+DEFINE_MQTT_TrustCertVerifyCallbackIndex(5);
+DEFINE_MQTT_TrustCertVerifyCallbackIndex(6);
+DEFINE_MQTT_TrustCertVerifyCallbackIndex(7);
+DEFINE_MQTT_TrustCertVerifyCallbackIndex(8);
+DEFINE_MQTT_TrustCertVerifyCallbackIndex(9);
 // Add more, with incrementing indexes here, if you change MAX_MQTT_CLIENTS
 
 //------------------------------------------------------------------------------------
@@ -285,6 +291,11 @@ ssl_verify_callback_t* mqtt_verify_callbacks[] = {
     MQTT_TrustCertVerifyCallbackIndex(2),
     MQTT_TrustCertVerifyCallbackIndex(3),
     MQTT_TrustCertVerifyCallbackIndex(4),
+    MQTT_TrustCertVerifyCallbackIndex(5),
+    MQTT_TrustCertVerifyCallbackIndex(6),
+    MQTT_TrustCertVerifyCallbackIndex(7),
+    MQTT_TrustCertVerifyCallbackIndex(8),
+    MQTT_TrustCertVerifyCallbackIndex(9),
     // Add more, with incrementing indexes here, if you change MAX_MQTT_CLIENTS
 };
 
@@ -367,35 +378,15 @@ void MQTT_Destroy(void)
 **************************************************************************/
 int MQTT_Start(void)
 {
-    int i;
-    int err = USP_ERR_OK;
-    mqtt_client_t *client;
+    int err;
 
     OS_UTILS_LockMutex(&mqtt_access_mutex);
 
     // Initialise the SSL contexts for all of the clients
     // This cannot be done in MQTT_Init() because at that time in the initialisation the trust store certs haven't been locally cached
     // Also WSCLIENT_Start() is called after MQTT_Init(0, and it re-initialises OpenSSL (libwebsockets limitation)
-    for (i = 0; i < MAX_MQTT_CLIENTS; i++)
-    {
-        // Exit if unable to create an SSL context
-        // NOTE: Trust store certs are only loaded into the context later, on demand, since most of these contexts will be unused
-        client = &mqtt_clients[i];
-        client->ssl_ctx = SSL_CTX_new(SSLv23_client_method());
-        client->are_certs_loaded = false;
-        if (client->ssl_ctx == NULL)
-        {
-            USP_ERR_SetMessage("%s: SSL_CTX_new failed", __FUNCTION__);
-            err = USP_ERR_INTERNAL_ERROR;
-            goto exit;
-        }
+    err = InitMqttSSLContexts();
 
-        // Explicitly disallow SSLv2, as it is insecure. See https://arxiv.org/pdf/1407.2168.pdf
-        // NOTE: Even without this, SSLv2 ciphers don't seem to appear in the cipher list. Just added in case someone is using an older version of OpenSSL.
-        SSL_CTX_set_options(client->ssl_ctx, SSL_OP_NO_SSLv2);
-    }
-
-exit:
     OS_UTILS_UnlockMutex(&mqtt_access_mutex);
 
     return err;
@@ -1667,6 +1658,110 @@ void MQTT_ModifyConnectedControllers(int instance, kv_vector_t *controller_topic
 
 exit:
     OS_UTILS_UnlockMutex(&mqtt_access_mutex);
+}
+
+/*********************************************************************//**
+**
+** MQTT_ForceTrustStoreReload
+**
+** Reloads the trust store used by MQTT
+** All further connections and reconnections (eg initiated by DEVICE_MQTT_ScheduleReconnect)
+** will use the new trust store and agent cert
+** NOTE: It is safe to call this whilst connected. SSL contexts are reference counted, so any
+**       existing SSL connections will continue to use the old SSL context until the SSL connection is freed.
+**
+** \param   None
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int MQTT_ForceTrustStoreReload(void)
+{
+    int i;
+    int err;
+    mqtt_client_t *client;
+
+    OS_UTILS_LockMutex(&mqtt_access_mutex);
+
+    // Free all SSL contexts
+    for (i = 0; i < MAX_MQTT_CLIENTS; i++)
+    {
+        client = &mqtt_clients[i];
+        if (client->ssl_ctx)
+        {
+            SSL_CTX_free(client->ssl_ctx);
+            client->ssl_ctx = NULL;
+            client->are_certs_loaded = false;
+        }
+    }
+
+    // Exit if unable to re-initialise the SSL contexts
+    err = InitMqttSSLContexts();
+    if (err != USP_ERR_OK)
+    {
+        goto exit;
+    }
+
+    // Reload the trust store for all enabled connections
+    for (i = 0; i < MAX_MQTT_CLIENTS; i++)
+    {
+        client = &mqtt_clients[i];
+        if ((client->conn_params.instance != INVALID) && (client->conn_params.enable == true))
+        {
+            // Exit if unable to load the trust store
+            err = DEVICE_SECURITY_LoadTrustStore(client->ssl_ctx, SSL_VERIFY_PEER, client->verify_callback);
+            if (err != USP_ERR_OK)
+            {
+                goto exit;
+            }
+            client->are_certs_loaded = true;
+        }
+    }
+
+exit:
+    OS_UTILS_UnlockMutex(&mqtt_access_mutex);
+
+    return err;
+}
+
+/*********************************************************************//**
+**
+** InitMqttSSLContexts
+**
+** Initialise the SSL contexts of all MQTT clients
+**
+** \param   None
+**
+** \return  USP_ERR_OK if successful
+**
+**************************************************************************/
+int InitMqttSSLContexts(void)
+{
+    int i;
+    mqtt_client_t *client;
+
+    // Initialise the SSL contexts for all of the clients
+    // This cannot be done in MQTT_Init() because at that time in the initialisation the trust store certs haven't been locally cached
+    // Also WSCLIENT_Start() is called after MQTT_Init(0, and it re-initialises OpenSSL (libwebsockets limitation)
+    for (i = 0; i < MAX_MQTT_CLIENTS; i++)
+    {
+        // Exit if unable to create an SSL context
+        // NOTE: Trust store certs are only loaded into the context later, on demand, since most of these contexts will be unused
+        client = &mqtt_clients[i];
+        client->ssl_ctx = SSL_CTX_new(SSLv23_client_method());
+        client->are_certs_loaded = false;
+        if (client->ssl_ctx == NULL)
+        {
+            USP_ERR_SetMessage("%s: SSL_CTX_new failed", __FUNCTION__);
+            return USP_ERR_INTERNAL_ERROR;
+        }
+
+        // Explicitly disallow SSLv2, as it is insecure. See https://arxiv.org/pdf/1407.2168.pdf
+        // NOTE: Even without this, SSLv2 ciphers don't seem to appear in the cipher list. Just added in case someone is using an older version of OpenSSL.
+        SSL_CTX_set_options(client->ssl_ctx, SSL_OP_NO_SSLv2);
+    }
+
+    return USP_ERR_OK;
 }
 
 /*********************************************************************//**

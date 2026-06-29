@@ -186,7 +186,8 @@ typedef enum
     kWsclientMsgType_StopClient,
     kWsclientMsgType_ActivateScheduledActions,
     kWsclientMsgType_AllowConnect,
-    kWsclientMsgType_QueueUspRecord
+    kWsclientMsgType_QueueUspRecord,
+    kWsclientMsgType_ForceTrustStoreReload,
 } wsclient_msg_type_t;
 
 //------------------------------------------------------------------------------
@@ -268,6 +269,7 @@ void RemoveWsclientSendItem(wsclient_t *wc, wsclient_send_item_t *si);
 bool AreAllWsclientResponsesSent(void);
 void PurgeWsclientMessageQueue(void);
 void QueueUspConnectRecord_Wsclient(wsclient_t *wc);
+void HandleWsclient_ForceTrustStoreReload(void);
 
 // Code to help debug mutex issues
 //static int mtx_count = 0;
@@ -327,12 +329,12 @@ int WSCLIENT_Init(void)
 **
 ** Frees all memory associated with this component and closes all sockets
 **
-** \param   None
+** \param   purge_msg_queue - Set to true if the websocket client's message queue should be purged
 **
 ** \return  None
 **
 **************************************************************************/
-void WSCLIENT_Destroy(void)
+void WSCLIENT_Destroy(bool purge_msg_queue)
 {
     int i;
     wsclient_t *wc;
@@ -363,8 +365,11 @@ void WSCLIENT_Destroy(void)
         }
     }
 
-    // Remove all messages on the websocket client thread's message queue
-    PurgeWsclientMessageQueue();
+    // Remove all messages on the websocket client thread's message queue (if required)
+    if (purge_msg_queue)
+    {
+        PurgeWsclientMessageQueue();
+    }
 }
 
 /*********************************************************************//**
@@ -655,6 +660,45 @@ void WSCLIENT_QueueBinaryMessage(mtp_send_item_t *msi, int cont_instance, int mt
 
 /*********************************************************************//**
 **
+** WSCLIENT_ForceTrustStoreReload
+**
+** Reloads the trust store used by WSCLIENT
+** NOTE: This message will tear down the libwebsockets context, so after processing, no client connections will be running
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void WSCLIENT_ForceTrustStoreReload(void)
+{
+    wsclient_msg_t *msg;
+
+    // Exit if MTP thread has exited
+    if (is_wsclient_mtp_thread_exited)
+    {
+        return;
+    }
+
+    // Setup the message to post to the websock thread
+    msg = USP_MALLOC(sizeof(wsclient_msg_t));
+    memset(msg, 0, sizeof(wsclient_msg_t));
+    msg->msg_type = kWsclientMsgType_ForceTrustStoreReload;
+
+    // Add the message to the end of the message queue
+    OS_UTILS_LockMutex(&wsc_access_mutex);
+    DLLIST_LinkToTail(&wsclient_msg_queue, msg);
+    OS_UTILS_UnlockMutex(&wsc_access_mutex);
+
+    // Cause the libwebsocket poll() to exit and then read this message
+    if (wsc_ctx != NULL)
+    {
+        lws_cancel_service(wsc_ctx);
+    }
+}
+
+/*********************************************************************//**
+**
 ** WSCLIENT_GetRetryCount
 **
 ** Function called to obtain the retry count for a particular WebSocket connection
@@ -757,13 +801,13 @@ void *WSCLIENT_Main(void *args)
         ServiceWsclientMessageQueue();
         ServiceWsclientSendQueue();
 
-        // Exit this thread, if an exit is scheduled and all responses have been sent or all connections are currently disconned ted anyway
+        // Exit this thread, if an exit is scheduled and all responses have been sent or all connections are currently disconnected anyway
         if (mtp_exit_scheduled == kScheduledAction_Activated)
         {
             if (AreAllWsclientResponsesSent())
             {
                 // Free all memory associated with MTP layer and the libwebsockets context
-                WSCLIENT_Destroy();
+                WSCLIENT_Destroy(true);
 
                 // Prevent the data model from making any other changes to the MTP thread
                 is_wsclient_mtp_thread_exited = true;
@@ -844,6 +888,10 @@ void ServiceWsclientMessageQueue(void)
             HandleWsclient_QueueUspRecord(qur);
             break;
 
+        case kWsclientMsgType_ForceTrustStoreReload:
+            HandleWsclient_ForceTrustStoreReload();
+            break;
+
         default:
             break;
     }
@@ -852,6 +900,28 @@ void ServiceWsclientMessageQueue(void)
     // NOTE: No need to free message structure members. They are consumed by the relevant handler
     DLLIST_Unlink(&wsclient_msg_queue, msg);
     USP_FREE(msg);
+}
+
+/*********************************************************************//**
+**
+** HandleWsclient_ForceTrustStoreReload
+**
+** Processes a kWsclientMsgType_ForceTrustStoreReload message, by tearing down the libwebsockets context
+** and creating a new one with the new trust store loaded
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void HandleWsclient_ForceTrustStoreReload(void)
+{
+    // Allow some time for the call that initiated this from another thread (WSCLIENT_ForceTrustStoreReload) to complete
+    // If we don't wait, then there's a posibility that the call to lws_cancel_service() will access the wsc_ctx after it's been freed by WSCLIENT_Destroy()
+    usleep(100*MILLISECONDS);
+
+    WSCLIENT_Destroy(false);
+    WSCLIENT_Start();
 }
 
 /*********************************************************************//**

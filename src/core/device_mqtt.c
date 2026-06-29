@@ -42,6 +42,7 @@
 #include <time.h>
 #include <string.h>
 #include <limits.h>
+#include <unistd.h>
 
 #include "common_defs.h"
 #include "data_model.h"
@@ -364,6 +365,72 @@ int DEVICE_MQTT_StartAllClients(void)
         }
     }
     return USP_ERR_OK;
+}
+
+/*********************************************************************//**
+**
+** DEVICE_MQTT_RestartAllConnectionsWithNewTrustStore
+**
+** Tears down then restarts all enabled MQTT connections with new client cert and trust store certs
+** NOTE: The new trust store certs and client certs must have been updated in device_security.c prior to calling this function
+**
+** \param   None
+**
+** \return  None
+**
+**************************************************************************/
+void DEVICE_MQTT_RestartAllConnectionsWithNewTrustStore(void)
+{
+    client_t *mqttclient;
+    int err;
+    int i;
+    int restart_attempts;
+
+    // Iterate over all enabled MQTT clients, stopping them
+    for (i = 0; i<MAX_MQTT_CLIENTS; i++)
+    {
+        mqttclient = &mqtt_client_params[i];
+        if ((mqttclient->conn_params.instance != INVALID) && (mqttclient->conn_params.enable == true))
+        {
+            MQTT_DisableClient(mqttclient->conn_params.instance); // Ignoring error, since it could only occur if device_mqtt.c and mqtt.c were out of step
+        }
+    }
+
+    // Activate the stopping of all enabled MQTT clients
+    MQTT_ActivateScheduledActions();
+
+    // Force the trust store to be reloaded on all subsequent connects
+    MQTT_ForceTrustStoreReload();
+
+    // Iterate over all enabled MQTT clients, restarting them
+    #define RESTART_INITIAL_DELAY_MS   100    // 100 milli-seconds
+    #define RESTART_TIMEOUT             10    // 10 seconds total timeout on each MQTT client
+    #define RESTART_ATTEMPT_DELAY_MS   100    // 100 milli-seconds
+    #define MAX_RESTART_ATTEMPTS ((RESTART_TIMEOUT*1000)/RESTART_ATTEMPT_DELAY_MS)
+    usleep(RESTART_INITIAL_DELAY_MS*1000);     // Wait some time to allow graceful disconnect to complete without getting error logged by the retry attempt loop
+    for (i = 0; i<MAX_MQTT_CLIENTS; i++)
+    {
+        mqttclient = &mqtt_client_params[i];
+        if ((mqttclient->conn_params.instance != INVALID) && (mqttclient->conn_params.enable == true))
+        {
+            restart_attempts = 0;
+            err = EnableMQTTClient(mqttclient);
+
+            // Retry until restart is successful. It will be unsuccessful until graceful disconnect has completed
+            while ((err != USP_ERR_OK) && (restart_attempts < MAX_RESTART_ATTEMPTS))
+            {
+                usleep(RESTART_ATTEMPT_DELAY_MS*1000);
+                restart_attempts++;
+                err = EnableMQTTClient(mqttclient);
+            }
+
+            // If we timed out restarting the connection, then log this
+            if ((err != USP_ERR_OK) && (restart_attempts == MAX_RESTART_ATTEMPTS))
+            {
+                USP_LOG_Error("%s: Failed to restart %s.%d", __FUNCTION__, device_mqtt_client_root, mqttclient->conn_params.instance);
+            }
+        }
+    }
 }
 
 /*********************************************************************//**
