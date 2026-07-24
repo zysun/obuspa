@@ -1,5 +1,14 @@
 # OB-USP-AGENT Changelog
 
+## 2026-07-24 v11.0.7
+### Added
+- CODING_GUIDELINES.md
+
+### Updated
+_ Participation Agreement (CLA) Link to point to new location
+- Removed unused file (GitHub_release_assets.note)
+
+
 ## 2026-06-29 v11.0.6
 ### Fixed
 - Race hazard in Websockets server MTP that caused an assert
