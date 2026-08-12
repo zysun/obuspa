@@ -182,7 +182,226 @@ void STR_VECTOR_Add(str_vector_t *sv, char *str)
 
 ---
 
-## 六、结论
+## 六、测试代码
+
+### 6.1 基准测试程序（glibc 版）
+
+`vec_bench.c` — 对比当前实现（+1 realloc）与容量翻倍策略：
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define N 4000
+
+double now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+// 方案A：当前实现，每次 +1 realloc
+void bench_current(void) {
+    char **vec = NULL;
+    int n = 0;
+    double t0 = now_ms();
+    for (int i = 0; i < N; i++) {
+        vec = realloc(vec, (n + 1) * sizeof(char *));
+        vec[n] = strdup("Device.DeviceInfo.SerialNumber.ABCDEF");
+        n++;
+    }
+    double t1 = now_ms();
+    printf("方案A (+1 realloc)      : %8.2f ms   (%d 次 realloc)\n", t1 - t0, N);
+    for (int i = 0; i < n; i++) free(vec[i]);
+    free(vec);
+}
+
+// 方案B：容量翻倍
+void bench_doubling(void) {
+    char **vec = NULL;
+    int n = 0, cap = 0;
+    double t0 = now_ms();
+    int reallocs = 0;
+    for (int i = 0; i < N; i++) {
+        if (n == cap) {
+            cap = (cap == 0) ? 8 : cap * 2;
+            vec = realloc(vec, cap * sizeof(char *));
+            reallocs++;
+        }
+        vec[n] = strdup("Device.DeviceInfo.SerialNumber.ABCDEF");
+        n++;
+    }
+    double t1 = now_ms();
+    printf("方案B (容量翻倍)        : %8.2f ms   (%d 次 realloc)\n", t1 - t0, reallocs);
+    for (int i = 0; i < n; i++) free(vec[i]);
+    free(vec);
+}
+
+int main(void) {
+    // 预热
+    bench_current();
+    bench_doubling();
+    printf("--- 正式测试 ---\n");
+    bench_current();
+    bench_current();
+    bench_doubling();
+    bench_doubling();
+    return 0;
+}
+```
+
+编译运行：
+
+```bash
+gcc -O2 -o vec_bench vec_bench.c && ./vec_bench
+```
+
+### 6.2 基准测试程序（musl 版）
+
+`vec_bench_musl.c` — 用 musl-gcc 编译同一逻辑，模拟目标设备 libc：
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#define N 4000
+double now_ms(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec*1000.0+ts.tv_nsec/1e6;}
+
+void bench_current(void) {
+    char **vec = NULL; int n = 0;
+    double t0 = now_ms();
+    for (int i = 0; i < N; i++) {
+        vec = realloc(vec, (n + 1) * sizeof(char *));
+        vec[n] = strdup("Device.DeviceInfo.SerialNumber.ABCDEF");
+        n++;
+    }
+    double t1 = now_ms();
+    printf("musl 方案A(+1 realloc) : %8.3f ms\n", t1 - t0);
+    for (int i = 0; i < n; i++) free(vec[i]);
+    free(vec);
+}
+
+void bench_doubling(void) {
+    char **vec = NULL; int n = 0, cap = 0; int reallocs = 0;
+    double t0 = now_ms();
+    for (int i = 0; i < N; i++) {
+        if (n == cap) { cap = (cap == 0) ? 8 : cap * 2; vec = realloc(vec, cap * sizeof(char *)); reallocs++; }
+        vec[n] = strdup("Device.DeviceInfo.SerialNumber.ABCDEF");
+        n++;
+    }
+    double t1 = now_ms();
+    printf("musl 方案B(容量翻倍)   : %8.3f ms (%d realloc)\n", t1 - t0, reallocs);
+    for (int i = 0; i < n; i++) free(vec[i]);
+    free(vec);
+}
+
+int main(void) {
+    bench_current(); bench_doubling();
+    bench_current(); bench_current();
+    bench_doubling(); bench_doubling();
+    return 0;
+}
+```
+
+编译运行：
+
+```bash
+musl-gcc -O2 -o vec_bench_musl vec_bench_musl.c && ./vec_bench_musl
+```
+
+### 6.3 最坏情况模拟 + 累计复制量统计
+
+`vec_bench_worst.c` — 模拟每次 realloc 都强制搬移的场景，并统计理论累计复制字节数：
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define N 4000
+double now_ms(void){struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);return ts.tv_sec*1000.0+ts.tv_nsec/1e6;}
+
+// 模拟最坏情况：每次 realloc 都强制搬移（用 realloc 到新地址）
+void bench_worst_move(void) {
+    char **vec = NULL;
+    int n = 0;
+    double t0 = now_ms();
+    for (int i = 0; i < N; i++) {
+        size_t sz = (n + 1) * sizeof(char *);
+        char **tmp = malloc(sz);            // 新分配
+        if (vec) memcpy(tmp, vec, n * sizeof(char *));  // 强制搬移旧数据
+        free(vec);                          // 释放旧的
+        vec = tmp;
+        vec[n] = strdup("x");
+        n++;
+    }
+    double t1 = now_ms();
+    printf("最坏情况(每次强制搬移) : %8.2f ms\n", t1 - t0);
+    for (int i = 0; i < n; i++) free(vec[i]);
+    free(vec);
+}
+
+// 累计复制的字节数统计
+void count_copied(void) {
+    long long copied = 0;
+    int n = 0;
+    for (int i = 0; i < N; i++) {
+        copied += (long long)n * sizeof(char *);  // 第 i 次要搬 n 个指针
+        n++;
+    }
+    printf("理论累计复制: %lld 字节 = %.1f MB (若每次realloc都搬移)\n",
+           copied, copied / 1024.0 / 1024.0);
+}
+
+int main(void) {
+    count_copied();
+    bench_worst_move();
+    return 0;
+}
+```
+
+编译运行：
+
+```bash
+gcc -O2 -o vec_bench_worst vec_bench_worst.c && ./vec_bench_worst
+```
+
+### 6.4 测试结果汇总
+
+**glibc 桌面环境（gcc -O2）：**
+
+```
+方案A (+1 realloc)      :     0.22 ms   (4000 次 realloc)
+方案A (+1 realloc)      :     0.14 ms   (4000 次 realloc)
+方案B (容量翻倍)        :     0.06 ms   (10 次 realloc)
+方案B (容量翻倍)        :     0.06 ms   (10 次 realloc)
+```
+
+**musl 1.2.5 环境（musl-gcc -O2）：**
+
+```
+musl 方案A(+1 realloc) :    0.751 ms
+musl 方案B(容量翻倍)   :    0.285 ms (10 realloc)
+musl 方案A(+1 realloc) :    0.679 ms
+musl 方案A(+1 realloc) :    0.670 ms
+musl 方案B(容量翻倍)   :    0.281 ms (10 realloc)
+musl 方案B(容量翻倍)   :    0.281 ms (10 realloc)
+```
+
+**最坏情况模拟：**
+
+```
+理论累计复制: 63984000 字节 = 61.0 MB (若每次realloc都搬移)
+最坏情况(每次强制搬移) :     1.32 ms
+```
+
+---
+
+## 七、结论
 
 | 维度 | 结论 |
 |------|------|
